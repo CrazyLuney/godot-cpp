@@ -44,6 +44,10 @@ option(GENERATE_TEMPLATE_GET_NODE "Generate a template version of the Node class
 option(GODOT_CPP_SYSTEM_HEADERS "Expose headers as SYSTEM." ON)
 option(GODOT_CPP_WARNING_AS_ERROR "Treat warnings as errors" OFF)
 
+# Disable exception handling. Godot doesn't use exceptions anywhere, and this
+# saves around 20% of binary size and very significant build time (GH-80513).
+option(GODOT_DISABLE_EXCEPTIONS "Force disabling exception handling code" ON)
+
 # Add path to modules
 list( APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/" )
 
@@ -83,44 +87,6 @@ if ("${FLOAT_PRECISION}" STREQUAL "double")
 	add_definitions(-DREAL_T_IS_DOUBLE)
 endif()
 
-set(GODOT_COMPILE_FLAGS )
-
-if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
-	# using Visual Studio C++
-	set(GODOT_COMPILE_FLAGS "/utf-8") # /GF /MP
-
-	if(CMAKE_BUILD_TYPE MATCHES Debug)
-		set(GODOT_COMPILE_FLAGS "${GODOT_COMPILE_FLAGS} /MDd") # /Od /RTC1 /Zi
-	else()
-		set(GODOT_COMPILE_FLAGS "${GODOT_COMPILE_FLAGS} /MD /O2") # /Oy /GL /Gy
-		STRING(REGEX REPLACE "/RTC(su|[1su])" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-		string(REPLACE "/RTC1" "" CMAKE_CXX_FLAGS_DEBUG ${CMAKE_CXX_FLAGS_DEBUG})
-	endif(CMAKE_BUILD_TYPE MATCHES Debug)
-
-	add_definitions(-DNOMINMAX)
-else()  # GCC/Clang
-	if(CMAKE_BUILD_TYPE MATCHES Debug)
-		set(GODOT_COMPILE_FLAGS "${GODOT_COMPILE_FLAGS} -fno-omit-frame-pointer -O0 -g")
-	else()
-		set(GODOT_COMPILE_FLAGS "${GODOT_COMPILE_FLAGS} -O3")
-	endif(CMAKE_BUILD_TYPE MATCHES Debug)
-endif()
-
-# Disable exception handling. Godot doesn't use exceptions anywhere, and this
-# saves around 20% of binary size and very significant build time (GH-80513).
-option(GODOT_DISABLE_EXCEPTIONS ON "Force disabling exception handling code")
-if (GODOT_DISABLE_EXCEPTIONS)
-	if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
-		set(GODOT_COMPILE_FLAGS "${GODOT_COMPILE_FLAGS} -D_HAS_EXCEPTIONS=0")
-	else()
-		set(GODOT_COMPILE_FLAGS "${GODOT_COMPILE_FLAGS} -fno-exceptions")
-	endif()
-else()
-	if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "MSVC")
-		set(GODOT_COMPILE_FLAGS "${GODOT_COMPILE_FLAGS} /EHsc")
-	endif()
-endif()
-
 # Generate source from the bindings file
 find_package(Python3 3.4 REQUIRED) # pathlib should be present
 if(GENERATE_TEMPLATE_GET_NODE)
@@ -155,6 +121,44 @@ add_library(${PROJECT_NAME} STATIC
 		${GENERATED_FILES_LIST}
 )
 add_library(godot::cpp ALIAS ${PROJECT_NAME})
+
+if(MSVC)
+	foreach(flag_var CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE)
+		string(REPLACE "/EHsc" "" ${flag_var} "${${flag_var}}")
+		string(REGEX REPLACE "/RTC[^ ]*" "" ${flag_var} "${${flag_var}}")
+	endforeach(flag_var)
+endif()
+
+if(MSVC)
+	# using Visual Studio C++
+	set_property(TARGET ${PROJECT_NAME} PROPERTY MSVC_DEBUG_INFORMATION_FORMAT $<IF:$<CONFIG:DEBUG>,ProgramDatabase,>)
+	set_property(TARGET ${PROJECT_NAME} PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded$<$<CONFIG:DEBUG>:Debug>DLL)
+
+	target_compile_options(${PROJECT_NAME} PRIVATE /utf-8)
+	target_compile_options(${PROJECT_NAME} PRIVATE /MP)
+	target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:Debug>:/RTC1>)
+
+	target_compile_definitions(${PROJECT_NAME} PRIVATE WIN32_LEAN_AND_MEAN)
+	target_compile_definitions(${PROJECT_NAME} PRIVATE NOMINMAX)
+	# target_compile_definitions(${PROJECT_NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)
+	# target_compile_definitions(${PROJECT_NAME} PRIVATE _CRT_NONSTDC_NO_DEPRECATE)
+else()  # GCC/Clang
+	target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:DEBUG>:-fno-omit-frame-pointer -O0 -g>)
+	target_compile_options(${PROJECT_NAME} PRIVATE $<$<CONFIG:RELEASE>:-O3>)
+endif()
+
+if(GODOT_DISABLE_EXCEPTIONS)
+	if(MSVC)
+		target_compile_definitions(${PROJECT_NAME} PRIVATE _HAS_EXCEPTIONS=0)
+	else()
+		target_compile_options(${PROJECT_NAME} PRIVATE -fno-exceptions)
+	endif()
+else()
+	if(MSVC)
+		target_compile_definitions(${PROJECT_NAME} PRIVATE _HAS_EXCEPTIONS=1)
+		target_compile_options(${PROJECT_NAME} PRIVATE /EHsc)
+	endif()
+endif()
 
 include(GodotCompilerWarnings)
 
@@ -199,21 +203,17 @@ target_include_directories(${PROJECT_NAME} ${GODOT_CPP_SYSTEM_HEADERS_ATTRIBUTE}
 	${GODOT_GDEXTENSION_DIR}
 )
 
-# Add the compile flags
-set_property(TARGET ${PROJECT_NAME} APPEND_STRING PROPERTY COMPILE_FLAGS ${GODOT_COMPILE_FLAGS})
-
 # Create the correct name (godot.os.build_type.system_bits)
 string(TOLOWER "${CMAKE_SYSTEM_NAME}" SYSTEM_NAME)
-string(TOLOWER "${CMAKE_BUILD_TYPE}" BUILD_TYPE)
 
 if(ANDROID)
 	# Added the android abi after system name
 	set(SYSTEM_NAME ${SYSTEM_NAME}.${ANDROID_ABI})
 
 	# Android does not have the bits at the end if you look at the main godot repo build
-	set(OUTPUT_NAME "godot-cpp.${SYSTEM_NAME}.${BUILD_TYPE}")
+	set(OUTPUT_NAME "godot-cpp.${SYSTEM_NAME}.$<LOWER_CASE:$<CONFIG>>")
 else()
-	set(OUTPUT_NAME "godot-cpp.${SYSTEM_NAME}.${BUILD_TYPE}.${BITS}")
+	set(OUTPUT_NAME "godot-cpp.${SYSTEM_NAME}.$<LOWER_CASE:$<CONFIG>>.${BITS}")
 endif()
 
 set_target_properties(${PROJECT_NAME}
